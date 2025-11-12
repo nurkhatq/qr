@@ -93,7 +93,7 @@ if uploaded_files and not st.session_state.processing:
     st.markdown("---")
     
     # Кнопка обработки
-    if st.button("🚀 Начать обработку", type="primary", use_container_width=True):
+    if st.button("🚀 Начать обработку", type="primary"):
         st.session_state.processing = True
         st.rerun()
 
@@ -236,7 +236,7 @@ if st.session_state.results is not None:
             }
             for r in results
         ])
-        st.dataframe(result_df, width=None, hide_index=True)
+        st.dataframe(result_df, hide_index=True)
     
     # Данные
     if df is not None and len(df) > 0:
@@ -246,14 +246,14 @@ if st.session_state.results is not None:
         display_df = df[['uploaded_date', 'pdf_date', 'source_pdf', 'seq', 'place_number', 'weight', 'order']].copy()
         display_df.columns = ['Дата загрузки', 'Дата приема-передачи', 'Источник PDF', '№ п/п', 'Номер места', 'Вес', 'Заказ']
         
-        st.dataframe(display_df, width=None, height=400)
+        st.dataframe(display_df, height=400)
         
         # Кнопка отправки
         st.markdown("---")
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            if st.button("📤 Отправить в Google Sheets", type="primary", use_container_width=True):
+            if st.button("📤 Отправить в Google Sheets", type="primary"):
                 try:
                     with st.spinner("📤 Отправка данных..."):
                         sheet_url = update_google_sheet(df)
@@ -283,7 +283,7 @@ if st.session_state.results is not None:
                     """)
         
         with col2:
-            if st.button("🔄 Новая обработка", use_container_width=True):
+            if st.button("🔄 Новая обработка"):
                 st.session_state.results = None
                 st.session_state.df = None
                 st.session_state.processing = False
