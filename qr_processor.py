@@ -3,6 +3,7 @@ import os
 import re
 import io
 import json
+import sys
 from pathlib import Path
 from datetime import datetime
 import requests
@@ -109,20 +110,36 @@ def decode_qr_from_image(image_data):
     Извлекает все QR-коды из изображения.
     image_data: путь к файлу или bytes
     """
-    # Читаем изображение
-    if isinstance(image_data, (str, Path)):
-        img = cv2.imread(str(image_data))
-    else:
-        nparr = np.frombuffer(image_data, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    print(f"[DEBUG] Начало декодирования QR, размер данных: {len(image_data) if isinstance(image_data, bytes) else 'N/A'}")
+    sys.stdout.flush()
     
-    if img is None:
+    # Читаем изображение
+    try:
+        if isinstance(image_data, (str, Path)):
+            img = cv2.imread(str(image_data))
+        else:
+            nparr = np.frombuffer(image_data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if img is None:
+            print("[DEBUG] Не удалось декодировать изображение")
+            sys.stdout.flush()
+            return []
+        
+        print(f"[DEBUG] Изображение загружено: {img.shape}")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"[DEBUG] Ошибка при загрузке изображения: {e}")
+        sys.stdout.flush()
         return []
     
     urls = set()
     detector = cv2.QRCodeDetector()
+    attempts = 0
     
-    def try_detect(image):
+    def try_detect(image, method_name=""):
+        nonlocal attempts, urls
+        attempts += 1
         try:
             retval, decoded_info, points, _ = detector.detectAndDecodeMulti(image)
             if retval and decoded_info:
@@ -130,72 +147,101 @@ def decode_qr_from_image(image_data):
                     if data:
                         matches = re.findall(r"https?://[^\s]+", data)
                         for m in matches:
-                            urls.add(m.rstrip(")\"'"))
-            return len(decoded_info) if retval else 0
-        except:
-            return 0
+                            url = m.rstrip(")\"'")
+                            urls.add(url)
+                            print(f"[DEBUG] {method_name}: Найден URL: {url[:50]}...")
+                            sys.stdout.flush()
+                return len(decoded_info) if retval else 0
+        except Exception as e:
+            print(f"[DEBUG] {method_name}: Ошибка - {e}")
+            sys.stdout.flush()
+        return 0
     
     # 1. Оригинал
-    try_detect(img)
+    print("[DEBUG] Попытка 1: Оригинал")
+    sys.stdout.flush()
+    try_detect(img, "Оригинал")
     
     # 2. Grayscale
+    print("[DEBUG] Попытка 2: Grayscale")
+    sys.stdout.flush()
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    try_detect(gray)
+    try_detect(gray, "Grayscale")
     
     # 3. Масштабирование
     for scale in [0.5, 1.5, 2.0]:
+        print(f"[DEBUG] Попытка: Масштаб {scale}")
+        sys.stdout.flush()
         width = int(img.shape[1] * scale)
         height = int(img.shape[0] * scale)
         scaled = cv2.resize(img, (width, height), interpolation=cv2.INTER_LINEAR)
-        try_detect(scaled)
+        try_detect(scaled, f"Масштаб {scale}")
     
     # 4. Бинаризация
     for block_size in [11, 21, 31]:
+        print(f"[DEBUG] Попытка: Бинаризация block_size={block_size}")
+        sys.stdout.flush()
         try:
             binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                           cv2.THRESH_BINARY, block_size, 5)
-            try_detect(binary)
-            try_detect(cv2.bitwise_not(binary))
-        except:
-            pass
+            try_detect(binary, f"Бинаризация {block_size}")
+            try_detect(cv2.bitwise_not(binary), f"Инверс {block_size}")
+        except Exception as e:
+            print(f"[DEBUG] Ошибка бинаризации: {e}")
+            sys.stdout.flush()
     
     # 5. OTSU
+    print("[DEBUG] Попытка: OTSU")
+    sys.stdout.flush()
     try:
         _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        try_detect(otsu)
-    except:
-        pass
+        try_detect(otsu, "OTSU")
+    except Exception as e:
+        print(f"[DEBUG] Ошибка OTSU: {e}")
+        sys.stdout.flush()
     
     # 6. CLAHE
+    print("[DEBUG] Попытка: CLAHE")
+    sys.stdout.flush()
     try:
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         enhanced = clahe.apply(gray)
-        try_detect(enhanced)
-    except:
-        pass
+        try_detect(enhanced, "CLAHE")
+    except Exception as e:
+        print(f"[DEBUG] Ошибка CLAHE: {e}")
+        sys.stdout.flush()
     
     # 7. Разделение на части
+    print("[DEBUG] Попытка: Разделение на части")
+    sys.stdout.flush()
     h, w = img.shape[:2]
     parts = [
-        img[0:h//2, :],
-        img[h//2:h, :],
-        img[:, 0:w//2],
-        img[:, w//2:w],
+        ("Верх", img[0:h//2, :]),
+        ("Низ", img[h//2:h, :]),
+        ("Лево", img[:, 0:w//2]),
+        ("Право", img[:, w//2:w]),
     ]
-    for part in parts:
-        try_detect(part)
+    for name, part in parts:
+        try_detect(part, f"Часть {name}")
     
+    print(f"[DEBUG] Завершено. Всего попыток: {attempts}, найдено URL: {len(urls)}")
+    sys.stdout.flush()
     return list(urls)
 
 def download_pdf_to_memory(url, timeout=30):
     """Скачивает PDF в память и возвращает байты"""
+    print(f"[DEBUG] Скачивание PDF: {url[:50]}...")
+    sys.stdout.flush()
     headers = {"User-Agent": USER_AGENT}
     try:
         r = requests.get(url, headers=headers, timeout=timeout)
         r.raise_for_status()
+        print(f"[DEBUG] PDF скачан: {len(r.content)} байт")
+        sys.stdout.flush()
         return r.content
     except Exception as e:
         print(f"[!] Ошибка при скачивании {url}: {e}")
+        sys.stdout.flush()
         raise
 
 def extract_pdf_date(pdf_bytes):
@@ -205,12 +251,9 @@ def extract_pdf_date(pdf_bytes):
             for page in pdf.pages:
                 text = page.extract_text()
                 if text:
-                    # Ищем дату после "Дата приёма-передачи:" или "Дата приема-передачи:"
                     match = re.search(r'Дата\s+приёма[-­\s]*передачи[:\s]+(\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}:\d{2})', text, re.IGNORECASE)
                     if match:
                         return match.group(1)
-                    
-                    # Альтернативный формат
                     match = re.search(r'(\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}:\d{2})', text)
                     if match:
                         return match.group(1)
@@ -220,13 +263,14 @@ def extract_pdf_date(pdf_bytes):
 
 def extract_table_rows_from_pdf(pdf_bytes, source_name):
     """Извлекает строки таблицы из PDF (из памяти)"""
+    print(f"[DEBUG] Извлечение данных из PDF: {source_name}")
+    sys.stdout.flush()
     rows = []
     pdf_date = extract_pdf_date(pdf_bytes)
     
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
-                # Извлечение таблиц
                 try:
                     tables = page.extract_tables()
                 except Exception:
@@ -243,7 +287,6 @@ def extract_table_rows_from_pdf(pdf_bytes, source_name):
                                 "raw_cells": [("" if c is None else str(c).strip()) for c in trow]
                             })
                 
-                # Извлечение текста
                 text = page.extract_text()
                 if text:
                     for line in text.splitlines():
@@ -254,8 +297,11 @@ def extract_table_rows_from_pdf(pdf_bytes, source_name):
                                 "pdf_date": pdf_date,
                                 "raw_text": line
                             })
+        print(f"[DEBUG] Извлечено строк: {len(rows)}")
+        sys.stdout.flush()
     except Exception as e:
         print(f"[!] Ошибка при чтении PDF: {e}")
+        sys.stdout.flush()
         raise
     
     return rows
@@ -267,11 +313,9 @@ def normalize_row(item):
     raw = item.get("raw_text") or " | ".join(item.get("raw_cells", []))
     raw = raw.replace("\u00ad", "-").strip()
     
-    # Пропускаем заголовки
     if re.search(r"№\s*п/п|Номер места|Вес|Заказ", raw, re.IGNORECASE):
         return None
     
-    # Таблица
     if item.get("raw_cells"):
         cells = [("" if c is None else str(c).strip().replace("\u00ad", "-")) for c in item["raw_cells"]]
         if len(cells) >= 3:
@@ -279,7 +323,7 @@ def normalize_row(item):
             place = cells[1]
             weight = cells[2]
             order = " ".join(cells[3:]) if len(cells) > 3 else ""
-            order = re.sub(r'\s+', '', order)  # Убираем все пробелы
+            order = re.sub(r'\s+', '', order)
             return {
                 "source_pdf": src,
                 "pdf_date": pdf_date,
@@ -289,14 +333,13 @@ def normalize_row(item):
                 "order": order
             }
     
-    # Текст
     tokens = re.split(r'\s+', raw)
     if len(tokens) >= 4:
         seq = tokens[0]
         place = tokens[1]
         weight = tokens[2]
         order = " ".join(tokens[3:])
-        order = re.sub(r'\s+', '', order)  # Убираем все пробелы
+        order = re.sub(r'\s+', '', order)
         return {
             "source_pdf": src,
             "pdf_date": pdf_date,
@@ -313,10 +356,16 @@ def process_single_image(image_data, filename):
     Обрабатывает одно изображение и возвращает результат
     Возвращает: (success, qr_count, rows, error_message)
     """
+    print(f"[DEBUG] ========== Начало обработки: {filename} ==========")
+    sys.stdout.flush()
+    
     try:
         # Декодируем QR
         urls = decode_qr_from_image(image_data)
         qr_count = len(urls)
+        
+        print(f"[DEBUG] Найдено QR кодов: {qr_count}")
+        sys.stdout.flush()
         
         if not urls:
             return True, 0, [], None
@@ -326,6 +375,9 @@ def process_single_image(image_data, filename):
         # Обрабатываем каждый QR
         for idx, url in enumerate(urls):
             try:
+                print(f"[DEBUG] Обработка QR #{idx+1}/{qr_count}")
+                sys.stdout.flush()
+                
                 # Скачиваем PDF в память
                 pdf_bytes = download_pdf_to_memory(url)
                 
@@ -334,16 +386,32 @@ def process_single_image(image_data, filename):
                 items = extract_table_rows_from_pdf(pdf_bytes, source_name)
                 
                 # Нормализуем строки
+                normalized_count = 0
                 for item in items:
                     normalized = normalize_row(item)
                     if normalized:
                         all_rows.append(normalized)
+                        normalized_count += 1
+                
+                print(f"[DEBUG] QR #{idx+1}: Нормализовано {normalized_count} строк")
+                sys.stdout.flush()
             
             except Exception as e:
                 print(f"[!] Ошибка обработки QR #{idx+1}: {e}")
+                sys.stdout.flush()
+                import traceback
+                traceback.print_exc()
                 continue
         
+        print(f"[DEBUG] ========== Завершено: {filename}, всего строк: {len(all_rows)} ==========")
+        sys.stdout.flush()
         return True, qr_count, all_rows, None
     
     except Exception as e:
+        print(f"[DEBUG] ========== ОШИБКА: {filename} ==========")
+        sys.stdout.flush()
+        import traceback
+        error_trace = traceback.format_exc()
+        print(error_trace)
+        sys.stdout.flush()
         return False, 0, [], str(e)
