@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime
 import requests
 import cv2
+from pyzbar import pyzbar
 import pdfplumber
 import pandas as pd
 import numpy as np
@@ -27,17 +28,14 @@ def get_google_sheets_client():
         'https://www.googleapis.com/auth/drive'
     ]
     
-    # Для Streamlit Cloud используем secrets
     try:
         import streamlit as st
         if hasattr(st, 'secrets') and 'gcp_service_account' in st.secrets:
             credentials_dict = dict(st.secrets["gcp_service_account"])
             creds = Credentials.from_service_account_info(credentials_dict, scopes=scopes)
         else:
-            # Локальная разработка
             creds = Credentials.from_service_account_file('credentials.json', scopes=scopes)
     except:
-        # Локальная разработка
         creds = Credentials.from_service_account_file('credentials.json', scopes=scopes)
     
     client = gspread.authorize(creds)
@@ -52,7 +50,6 @@ def update_google_sheet(df, sheet_name=SPREADSHEET_NAME):
             spreadsheet = client.open(sheet_name)
         except gspread.SpreadsheetNotFound:
             spreadsheet = client.create(sheet_name)
-            # Делаем таблицу публичной для чтения
             spreadsheet.share('', perm_type='anyone', role='reader')
             print(f"[+] Создана новая таблица: {sheet_name}")
         
@@ -63,26 +60,21 @@ def update_google_sheet(df, sheet_name=SPREADSHEET_NAME):
         
         existing_data = worksheet.get_all_values()
         
-        # Подготавливаем данные с заголовками
         columns_order = ["uploaded_date", "pdf_date", "source_pdf", "seq", "place_number", "weight", "order"]
         df_ordered = df[columns_order].copy()
         
         if not existing_data or len(existing_data) == 0:
-            # Первая запись - добавляем заголовки
             headers = ["Дата загрузки", "Дата приема-передачи", "Источник PDF", "№ п/п", "Номер места", "Вес", "Заказ"]
             data_to_append = [headers] + df_ordered.values.tolist()
             worksheet.update('A1', data_to_append, value_input_option='USER_ENTERED')
             print(f"[+] Добавлено {len(df)} новых строк в Google Sheets")
         else:
-            # Есть данные - добавляем только новые строки
             existing_df = pd.DataFrame(existing_data[1:], columns=existing_data[0])
             
-            # Находим строки, которых еще нет
             new_rows = []
             for _, row in df_ordered.iterrows():
                 is_duplicate = False
                 for _, existing_row in existing_df.iterrows():
-                    # Проверяем по номеру места и заказу
                     if (str(row['place_number']) == str(existing_row.get(existing_data[0][4] if len(existing_data[0]) > 4 else '', '')) and 
                         str(row['order']) == str(existing_row.get(existing_data[0][6] if len(existing_data[0]) > 6 else '', ''))):
                         is_duplicate = True
@@ -107,10 +99,9 @@ def update_google_sheet(df, sheet_name=SPREADSHEET_NAME):
 
 def decode_qr_from_image(image_data):
     """
-    Извлекает все QR-коды из изображения.
-    image_data: путь к файлу или bytes
+    Оптимизированное декодирование QR с помощью pyzbar
     """
-    print(f"[DEBUG] Начало декодирования QR, размер данных: {len(image_data) if isinstance(image_data, bytes) else 'N/A'}")
+    print(f"[DEBUG] Начало декодирования QR")
     sys.stdout.flush()
     
     # Читаем изображение
@@ -126,111 +117,122 @@ def decode_qr_from_image(image_data):
             sys.stdout.flush()
             return []
         
-        print(f"[DEBUG] Изображение загружено: {img.shape}")
+        print(f"[DEBUG] Изображение: {img.shape}")
         sys.stdout.flush()
     except Exception as e:
-        print(f"[DEBUG] Ошибка при загрузке изображения: {e}")
+        print(f"[DEBUG] Ошибка: {e}")
         sys.stdout.flush()
         return []
     
-    urls = set()
-    detector = cv2.QRCodeDetector()
-    attempts = 0
+    found_urls = set()
+    found_data = set()
     
-    def try_detect(image, method_name=""):
-        nonlocal attempts, urls
-        attempts += 1
-        try:
-            retval, decoded_info, points, _ = detector.detectAndDecodeMulti(image)
-            if retval and decoded_info:
-                for data in decoded_info:
-                    if data:
-                        matches = re.findall(r"https?://[^\s]+", data)
-                        for m in matches:
-                            url = m.rstrip(")\"'")
-                            urls.add(url)
-                            print(f"[DEBUG] {method_name}: Найден URL: {url[:50]}...")
-                            sys.stdout.flush()
-                return len(decoded_info) if retval else 0
-        except Exception as e:
-            print(f"[DEBUG] {method_name}: Ошибка - {e}")
-            sys.stdout.flush()
-        return 0
+    def test_decode(image, method=""):
+        barcodes = pyzbar.decode(image)
+        for barcode in barcodes:
+            if barcode.type == 'QRCODE':
+                try:
+                    data = barcode.data.decode('utf-8', errors='ignore')
+                    if data not in found_data:
+                        found_data.add(data)
+                        print(f"[DEBUG] {method}: Найден QR")
+                        sys.stdout.flush()
+                        urls = re.findall(r"https?://[^\s]+", data)
+                        for url in urls:
+                            found_urls.add(url.rstrip(")\"'"))
+                except:
+                    pass
+    
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
     # 1. Оригинал
-    print("[DEBUG] Попытка 1: Оригинал")
-    sys.stdout.flush()
-    try_detect(img, "Оригинал")
+    test_decode(img, "Оригинал")
+    test_decode(gray, "Grayscale")
     
-    # 2. Grayscale
-    print("[DEBUG] Попытка 2: Grayscale")
-    sys.stdout.flush()
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    try_detect(gray, "Grayscale")
+    # 2. Масштабирование
+    for scale in [0.5, 0.75, 1.0, 1.5, 2.0, 2.5]:
+        w = int(img.shape[1] * scale)
+        h = int(img.shape[0] * scale)
+        if 50 < w < 5000 and 50 < h < 5000:
+            scaled = cv2.resize(gray, (w, h), interpolation=cv2.INTER_CUBIC)
+            test_decode(scaled, f"Масштаб {scale}")
     
-    # 3. Масштабирование
-    for scale in [0.5, 1.5, 2.0]:
-        print(f"[DEBUG] Попытка: Масштаб {scale}")
-        sys.stdout.flush()
-        width = int(img.shape[1] * scale)
-        height = int(img.shape[0] * scale)
-        scaled = cv2.resize(img, (width, height), interpolation=cv2.INTER_LINEAR)
-        try_detect(scaled, f"Масштаб {scale}")
+    # 3. Повороты
+    for angle in range(0, 360, 15):
+        if angle == 0:
+            continue
+        center = (gray.shape[1] // 2, gray.shape[0] // 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(gray, M, (gray.shape[1], gray.shape[0]))
+        test_decode(rotated, f"Поворот {angle}°")
     
-    # 4. Бинаризация
-    for block_size in [11, 21, 31]:
-        print(f"[DEBUG] Попытка: Бинаризация block_size={block_size}")
-        sys.stdout.flush()
-        try:
-            binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                          cv2.THRESH_BINARY, block_size, 5)
-            try_detect(binary, f"Бинаризация {block_size}")
-            try_detect(cv2.bitwise_not(binary), f"Инверс {block_size}")
-        except Exception as e:
-            print(f"[DEBUG] Ошибка бинаризации: {e}")
-            sys.stdout.flush()
-    
-    # 5. OTSU
-    print("[DEBUG] Попытка: OTSU")
-    sys.stdout.flush()
-    try:
-        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        try_detect(otsu, "OTSU")
-    except Exception as e:
-        print(f"[DEBUG] Ошибка OTSU: {e}")
-        sys.stdout.flush()
-    
-    # 6. CLAHE
-    print("[DEBUG] Попытка: CLAHE")
-    sys.stdout.flush()
-    try:
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    # 4. CLAHE
+    for clip in [2.0, 3.0]:
+        clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
-        try_detect(enhanced, "CLAHE")
-    except Exception as e:
-        print(f"[DEBUG] Ошибка CLAHE: {e}")
-        sys.stdout.flush()
+        test_decode(enhanced, f"CLAHE {clip}")
     
-    # 7. Разделение на части
-    print("[DEBUG] Попытка: Разделение на части")
-    sys.stdout.flush()
-    h, w = img.shape[:2]
-    parts = [
-        ("Верх", img[0:h//2, :]),
-        ("Низ", img[h//2:h, :]),
-        ("Лево", img[:, 0:w//2]),
-        ("Право", img[:, w//2:w]),
-    ]
-    for name, part in parts:
-        try_detect(part, f"Часть {name}")
+    # 5. Морфологические операции
+    for ksize in [3, 5, 7]:
+        kernel = np.ones((ksize, ksize), np.uint8)
+        opened = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
+        test_decode(opened, f"Open {ksize}")
+        closed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+        test_decode(closed, f"Close {ksize}")
     
-    print(f"[DEBUG] Завершено. Всего попыток: {attempts}, найдено URL: {len(urls)}")
+    # 6. Адаптивная бинаризация
+    for block in [11, 21, 31, 41]:
+        for C in [2, 5, 10]:
+            try:
+                binary = cv2.adaptiveThreshold(gray, 255, 
+                                              cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                              cv2.THRESH_BINARY, block, C)
+                test_decode(binary, f"Bin {block}/{C}")
+                test_decode(cv2.bitwise_not(binary), f"Inv {block}/{C}")
+            except:
+                pass
+    
+    # 7. OTSU
+    _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    test_decode(otsu, "OTSU")
+    test_decode(cv2.bitwise_not(otsu), "OTSU inv")
+    
+    # 8. Bilateral filter
+    bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
+    test_decode(bilateral, "Bilateral")
+    
+    # 9. Увеличение резкости
+    kernel_sharp = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+    sharpened = cv2.filter2D(gray, -1, kernel_sharp)
+    test_decode(sharpened, "Sharp")
+    
+    # 10. Гамма-коррекция
+    for gamma in [0.5, 1.5, 2.0]:
+        invGamma = 1.0 / gamma
+        table = np.array([((i / 255.0) ** invGamma) * 255 
+                         for i in range(256)]).astype("uint8")
+        gamma_img = cv2.LUT(gray, table)
+        test_decode(gamma_img, f"Gamma {gamma}")
+    
+    # 11. Эквализация
+    equalized = cv2.equalizeHist(gray)
+    test_decode(equalized, "Equalize")
+    
+    # 12. Разделение на части
+    h, w = gray.shape
+    test_decode(gray[:h//2, :], "Верх")
+    test_decode(gray[h//2:, :], "Низ")
+    test_decode(gray[:, :w//2], "Лево")
+    test_decode(gray[:, w//2:], "Право")
+    
+    print(f"[DEBUG] Найдено уникальных QR: {len(found_data)}, URL: {len(found_urls)}")
     sys.stdout.flush()
-    return list(urls)
+    
+    return list(found_urls)
 
 def download_pdf_to_memory(url, timeout=30):
     """Скачивает PDF в память и возвращает байты"""
-    print(f"[DEBUG] Скачивание PDF: {url[:50]}...")
+    print(f"[DEBUG] Скачивание PDF...")
     sys.stdout.flush()
     headers = {"User-Agent": USER_AGENT}
     try:
@@ -240,7 +242,7 @@ def download_pdf_to_memory(url, timeout=30):
         sys.stdout.flush()
         return r.content
     except Exception as e:
-        print(f"[!] Ошибка при скачивании {url}: {e}")
+        print(f"[!] Ошибка при скачивании: {e}")
         sys.stdout.flush()
         raise
 
@@ -262,8 +264,8 @@ def extract_pdf_date(pdf_bytes):
     return ""
 
 def extract_table_rows_from_pdf(pdf_bytes, source_name):
-    """Извлекает строки таблицы из PDF (из памяти)"""
-    print(f"[DEBUG] Извлечение данных из PDF: {source_name}")
+    """Извлекает строки таблицы из PDF"""
+    print(f"[DEBUG] Извлечение данных из PDF")
     sys.stdout.flush()
     rows = []
     pdf_date = extract_pdf_date(pdf_bytes)
@@ -360,7 +362,6 @@ def process_single_image(image_data, filename):
     sys.stdout.flush()
     
     try:
-        # Декодируем QR
         urls = decode_qr_from_image(image_data)
         qr_count = len(urls)
         
@@ -372,20 +373,15 @@ def process_single_image(image_data, filename):
         
         all_rows = []
         
-        # Обрабатываем каждый QR
         for idx, url in enumerate(urls):
             try:
                 print(f"[DEBUG] Обработка QR #{idx+1}/{qr_count}")
                 sys.stdout.flush()
                 
-                # Скачиваем PDF в память
                 pdf_bytes = download_pdf_to_memory(url)
-                
-                # Извлекаем данные
                 source_name = f"{filename}_QR{idx+1}.pdf"
                 items = extract_table_rows_from_pdf(pdf_bytes, source_name)
                 
-                # Нормализуем строки
                 normalized_count = 0
                 for item in items:
                     normalized = normalize_row(item)
@@ -399,8 +395,6 @@ def process_single_image(image_data, filename):
             except Exception as e:
                 print(f"[!] Ошибка обработки QR #{idx+1}: {e}")
                 sys.stdout.flush()
-                import traceback
-                traceback.print_exc()
                 continue
         
         print(f"[DEBUG] ========== Завершено: {filename}, всего строк: {len(all_rows)} ==========")
