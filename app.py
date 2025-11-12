@@ -3,6 +3,7 @@ import pandas as pd
 import time
 from datetime import datetime
 from io import BytesIO
+import traceback
 
 # Импорт функций
 from qr_processor import process_single_image, update_google_sheet
@@ -21,6 +22,10 @@ if 'results' not in st.session_state:
     st.session_state.results = None
 if 'df' not in st.session_state:
     st.session_state.df = None
+if 'uploaded_successfully' not in st.session_state:
+    st.session_state.uploaded_successfully = False
+if 'upload_time' not in st.session_state:
+    st.session_state.upload_time = None
 
 # Стили
 st.markdown("""
@@ -43,6 +48,17 @@ st.markdown("""
     }
     </style>
 """, unsafe_allow_html=True)
+
+# Проверка на автообновление после успешной загрузки
+if st.session_state.uploaded_successfully and st.session_state.upload_time:
+    elapsed = time.time() - st.session_state.upload_time
+    if elapsed >= 2:
+        st.session_state.processing = False
+        st.session_state.results = None
+        st.session_state.df = None
+        st.session_state.uploaded_successfully = False
+        st.session_state.upload_time = None
+        st.rerun()
 
 # Заголовок
 st.title("📊 QR Code Scanner → Google Sheets")
@@ -107,13 +123,19 @@ if st.session_state.processing and uploaded_files:
                 # Обработка
                 try:
                     image_bytes = uploaded_file.read()
-                    uploaded_file.seek(0)  # Возвращаем указатель
+                    uploaded_file.seek(0)
+                    
+                    # Логирование размера файла
+                    st.info(f"📊 Размер файла: {len(image_bytes) / 1024:.1f} KB")
                     
                     with st.spinner("🔍 Сканирую QR-коды..."):
                         success, qr_count, rows, error = process_single_image(image_bytes, uploaded_file.name)
                     
+                    # Детальное логирование
                     if not success:
                         st.error(f"❌ Ошибка: {error}")
+                        with st.expander("🔍 Детали ошибки"):
+                            st.code(error)
                         results.append({
                             'file': uploaded_file.name,
                             'status': 'error',
@@ -124,7 +146,12 @@ if st.session_state.processing and uploaded_files:
                     elif qr_count == 0:
                         st.warning(f"⚠️ QR-коды не найдены")
                         st.info("💡 Попробуйте:")
-                        st.markdown("- Загрузить более четкое фото\n- Убедиться, что QR-код полностью виден\n- Улучшить освещение")
+                        st.markdown("""
+                        - Загрузить более четкое фото
+                        - Убедиться, что QR-код полностью виден
+                        - Улучшить освещение
+                        - Проверить, что изображение не повреждено
+                        """)
                         results.append({
                             'file': uploaded_file.name,
                             'status': 'no_qr',
@@ -145,7 +172,10 @@ if st.session_state.processing and uploaded_files:
                     st.caption(f"⏱️ Обработано за {elapsed:.1f}с")
                 
                 except Exception as e:
+                    error_details = traceback.format_exc()
                     st.error(f"❌ Критическая ошибка: {str(e)}")
+                    with st.expander("🔍 Полная трассировка ошибки"):
+                        st.code(error_details)
                     results.append({
                         'file': uploaded_file.name,
                         'status': 'error',
@@ -158,13 +188,10 @@ if st.session_state.processing and uploaded_files:
         
         progress_bar.progress((idx + 1) / len(uploaded_files))
     
-    # Сохраняем результаты
     st.session_state.results = results
     
-    # Обработка данных
     if all_rows:
         df = pd.DataFrame(all_rows)
-        # Добавляем дату загрузки
         df['uploaded_date'] = upload_datetime
         df.drop_duplicates(inplace=True)
         st.session_state.df = df
@@ -209,18 +236,17 @@ if st.session_state.results is not None:
             }
             for r in results
         ])
-        st.dataframe(result_df, use_container_width=True, hide_index=True)
+        st.dataframe(result_df, width=None, hide_index=True)
     
     # Данные
     if df is not None and len(df) > 0:
         st.markdown("---")
         st.markdown("### 📋 Извлеченные данные")
         
-        # Показываем в удобном порядке
         display_df = df[['uploaded_date', 'pdf_date', 'source_pdf', 'seq', 'place_number', 'weight', 'order']].copy()
         display_df.columns = ['Дата загрузки', 'Дата приема-передачи', 'Источник PDF', '№ п/п', 'Номер места', 'Вес', 'Заказ']
         
-        st.dataframe(display_df, use_container_width=True, height=400)
+        st.dataframe(display_df, width=None, height=400)
         
         # Кнопка отправки
         st.markdown("---")
@@ -235,14 +261,25 @@ if st.session_state.results is not None:
                     st.success("✅ Данные успешно отправлены!")
                     st.markdown(f"### [🔗 Открыть таблицу]({sheet_url})")
                     st.balloons()
+                    
+                    st.session_state.uploaded_successfully = True
+                    st.session_state.upload_time = time.time()
+                    
+                    with st.spinner("Страница обновится через 2 секунды..."):
+                        time.sleep(2)
+                    
+                    st.rerun()
                 
                 except Exception as e:
+                    error_details = traceback.format_exc()
                     st.error(f"❌ Ошибка отправки: {str(e)}")
+                    with st.expander("🔍 Детали ошибки"):
+                        st.code(error_details)
                     st.info("Проверьте:")
                     st.markdown("""
-                    - Файл `credentials.json` в папке приложения
-                    - Права доступа service account
-                    - Интернет-соединение
+                    - Secrets настроены правильно в Streamlit Cloud
+                    - Service account имеет доступ к таблице
+                    - Интернет-соединение работает
                     """)
         
         with col2:
@@ -250,6 +287,8 @@ if st.session_state.results is not None:
                 st.session_state.results = None
                 st.session_state.df = None
                 st.session_state.processing = False
+                st.session_state.uploaded_successfully = False
+                st.session_state.upload_time = None
                 st.rerun()
     
     else:
@@ -265,6 +304,8 @@ if st.session_state.results is not None:
             st.session_state.results = None
             st.session_state.df = None
             st.session_state.processing = False
+            st.session_state.uploaded_successfully = False
+            st.session_state.upload_time = None
             st.rerun()
 
 # Футер
